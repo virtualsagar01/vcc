@@ -1,0 +1,7 @@
+User-agent: *
+Allow: /
+Disallow: /api/admin/
+Disallow: /api/orders/verify
+
+Sitemap: https://virtualcardnepal.com/sitemap.xml
+Sitemap: https://virtualcardnepal.com/api/sitemap.xml

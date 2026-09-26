@@ -1,0 +1,6 @@
+{
+  "name": "Virtual Card Nepal",
+  "description": "Nepal's premier platform for Virtual Dollar Cards, Prepaid Cards, Gift Cards, and Game Top-ups. Instant delivery with eSewa payments.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

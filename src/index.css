@@ -1,0 +1,11 @@
+@import "tailwindcss";
+
+html { scroll-behavior: smooth; -webkit-text-size-adjust: 100%; }
+body { min-width: 320px; overflow-x: hidden; padding-bottom: env(safe-area-inset-bottom); }
+button, a, input, select, textarea { -webkit-tap-highlight-color: transparent; }
+input, select, textarea { font-size: 16px; }
+@media (max-width: 640px) {
+  .modal-scroll { max-height: calc(100dvh - 1rem); }
+  .mobile-x-scroll { overflow-x: auto; scrollbar-width: none; scroll-snap-type: x proximity; }
+  .mobile-x-scroll::-webkit-scrollbar { display: none; }
+}
