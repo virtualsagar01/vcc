@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useRef, useState } from 'react';
 import { X, Upload, Check, AlertCircle, ShieldCheck, Phone, Mail, User, MapPin, Copy, ExternalLink } from 'lucide-react';
 import confetti from 'canvas-confetti';
 import { Product, AppSettings, Order } from '../types';
@@ -29,11 +29,10 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
   const [screenshotName, setScreenshotName] = useState('');
   const [transactionId, setTransactionId] = useState('');
   const [transactionUrl, setTransactionUrl] = useState('');
-  const [paymentMethod, setPaymentMethod] = useState<'esewa' | 'crypto'>(() => methods.some((m) => m.type === 'esewa') ? 'esewa' : 'crypto');
-  const [isSubmitting, setIsSubmitting] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [copied, setCopied] = useState(false);
 
+  // Build the available payment methods before using them in state initialization.
+  // Previously paymentMethod referenced `methods` before it was initialized, which
+  // caused a client-side ReferenceError as soon as CheckoutModal mounted.
   const configuredMethods = settings.payment_methods?.filter((m) => m.enabled) || [];
   const methods = configuredMethods.length
     ? configuredMethods
@@ -41,6 +40,13 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
         { id: 'esewa', name: 'eSewa', type: 'esewa' as const, enabled: true },
         { id: 'crypto', name: 'Crypto', type: 'crypto' as const, enabled: true, network: settings.crypto_payment_network, wallet_address: settings.crypto_payment_address },
       ];
+
+  const [paymentMethod, setPaymentMethod] = useState<'esewa' | 'crypto'>(() =>
+    methods.some((m) => m.type === 'esewa') ? 'esewa' : 'crypto'
+  );
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
   const cryptoMethod = methods.find((m) => m.type === 'crypto');
   const esewaMethod = methods.find((m) => m.type === 'esewa');
   const priceCalc = calculateOrderPrice(amountUSD, product, settings);
@@ -198,5 +204,56 @@ function Field({ label, required, helper, icon, value, onChange, placeholder, ty
 }
 
 function UploadBox({ required, name, preview, onFile, onRemove }: { required: boolean; name: string; preview: string; onFile: (file?: File) => void; onRemove: () => void }) {
-  return <div><div className="mb-1 flex items-center justify-between"><label className="text-sm font-medium text-neutral-200">Payment screenshot {required ? <span className="text-red-400">*</span> : <span className="text-neutral-500">(optional)</span>}</label>{preview && <button type="button" onClick={onRemove} className="text-xs text-red-300 hover:text-red-200">Remove</button>}</div>{preview ? <div className="overflow-hidden rounded-xl border border-white/10 bg-black/30"><img src={preview} alt="Payment screenshot preview" className="max-h-52 w-full object-contain" /><div className="flex items-center justify-between gap-2 border-t border-white/10 px-3 py-2 text-xs text-neutral-400"><span className="truncate">{name}</span><label className="cursor-pointer text-[#F3D56B] hover:text-white">Replace<input type="file" accept="image/jpeg,image/png,image/webp" className="hidden" onChange={(e) => onFile(e.target.files?.[0])} /></label></div></div> : <label className="flex min-h-28 cursor-pointer flex-col items-center justify-center rounded-xl border border-dashed border-white/15 bg-neutral-950 p-4 text-center transition hover:border-[#D4AF37]/60"><Upload className="mb-2 h-5 w-5 text-neutral-500" /><span className="text-sm text-neutral-300">Upload payment screenshot</span><span className="mt-1 text-xs text-neutral-600">JPG, PNG or WEBP · max 5 MB{required ? '' : ' · optional'}</span><input type="file" accept="image/jpeg,image/png,image/webp" className="hidden" onChange={(e) => onFile(e.target.files?.[0])} /></label>}</div>;
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  const chooseFile = () => inputRef.current?.click();
+
+  const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) onFile(file);
+    // Allow the same file to be selected again after replacing/removing it.
+    e.target.value = '';
+  };
+
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center justify-between">
+        <label className="text-sm font-medium text-neutral-200">
+          Payment screenshot {required ? <span className="text-red-400">*</span> : <span className="text-neutral-500">(optional)</span>}
+        </label>
+        {preview && (
+          <button type="button" onClick={onRemove} className="text-xs text-red-300 hover:text-red-200">Remove</button>
+        )}
+      </div>
+
+      <input
+        ref={inputRef}
+        type="file"
+        accept="image/jpeg,image/png,image/webp"
+        className="sr-only"
+        aria-label="Payment screenshot"
+        onChange={handleChange}
+      />
+
+      {preview ? (
+        <div className="overflow-hidden rounded-xl border border-white/10 bg-black/30">
+          <img src={preview} alt="Payment screenshot preview" className="max-h-52 w-full object-contain" />
+          <div className="flex items-center justify-between gap-2 border-t border-white/10 px-3 py-2 text-xs text-neutral-400">
+            <span className="min-w-0 truncate">{name}</span>
+            <button type="button" onClick={chooseFile} className="shrink-0 text-[#F3D56B] hover:text-white">Replace</button>
+          </div>
+        </div>
+      ) : (
+        <button
+          type="button"
+          onClick={chooseFile}
+          className="flex min-h-28 w-full flex-col items-center justify-center rounded-xl border border-dashed border-white/15 bg-neutral-950 p-4 text-center transition hover:border-[#D4AF37]/60 hover:bg-neutral-900"
+        >
+          <Upload className="mb-2 h-5 w-5 text-neutral-400" />
+          <span className="text-sm font-medium text-neutral-200">Upload payment screenshot</span>
+          <span className="mt-1 text-xs text-neutral-500">JPG, PNG or WEBP · max 5 MB{required ? '' : ' · optional'}</span>
+        </button>
+      )}
+    </div>
+  );
 }
