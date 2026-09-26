@@ -221,13 +221,15 @@ app.post('/api/products', requireAdmin, async (req, res) => {
 });
 
 app.put('/api/products/:id', requireAdmin, async (req, res) => {
-  const { data, error } = await supabase.from('products').update(req.body).eq('id', req.params.id).select().single();
+  const paramId = String(req.params.id);
+  const { data, error } = await supabase.from('products').update(req.body).eq('id', paramId).select().single();
   if (error) return res.status(400).json({ error: error.message });
   res.json(normalizeProduct(data));
 });
 
 app.delete('/api/products/:id', requireAdmin, async (req, res) => {
-  const { error } = await supabase.from('products').delete().eq('id', req.params.id);
+  const paramId = String(req.params.id);
+  const { error } = await supabase.from('products').delete().eq('id', paramId);
   if (error) return res.status(400).json({ error: error.message });
   res.json({ success: true });
 });
@@ -239,7 +241,7 @@ app.get('/api/orders', requireAdmin, async (_req, res) => {
 });
 
 app.get('/api/orders/:id', async (req, res) => {
-  const q = req.params.id;
+  const q = String(req.params.id);
   let { data } = await supabase.from('orders').select('*').eq('order_id', q.toUpperCase()).maybeSingle();
   if (!data && /^[0-9a-f-]{36}$/i.test(q)) {
     const byId = await supabase.from('orders').select('*').eq('id', q).maybeSingle();
@@ -310,25 +312,27 @@ app.post('/api/orders', async (req, res) => {
 });
 
 app.patch('/api/orders/:id/status', requireAdmin, async (req, res) => {
+  const paramId = String(req.params.id);
   const updates = { status: req.body.status, internal_notes: req.body.internal_notes, updated_at: new Date().toISOString() };
-  let query = supabase.from('orders').update(updates).eq('order_id', req.params.id.toUpperCase()).select().single();
+  let query = supabase.from('orders').update(updates).eq('order_id', paramId.toUpperCase()).select().single();
   let { data, error } = await query;
-  if (error && /^[0-9a-f-]{36}$/i.test(req.params.id)) { data = (await supabase.from('orders').update(updates).eq('id', req.params.id).select().single()).data; error = null; }
+  if (error && /^[0-9a-f-]{36}$/i.test(paramId)) { data = (await supabase.from('orders').update(updates).eq('id', paramId).select().single()).data; error = null; }
   if (error || !data) return res.status(400).json({ error: error?.message || 'Order not found' });
   res.json(normalizeOrder(data));
 });
 
 app.post('/api/orders/:id/issue-card', requireAdmin, async (req, res) => {
-  let { data: current, error: findError } = await supabase.from('orders').select('internal_notes').eq('order_id', req.params.id.toUpperCase()).maybeSingle();
-  if (!current && /^[0-9a-f-]{36}$/i.test(req.params.id)) { const byId = await supabase.from('orders').select('internal_notes').eq('id', req.params.id).maybeSingle(); current = byId.data; findError = byId.error; }
+  const paramId = String(req.params.id);
+  let { data: current, error: findError } = await supabase.from('orders').select('internal_notes').eq('order_id', paramId.toUpperCase()).maybeSingle();
+  if (!current && /^[0-9a-f-]{36}$/i.test(paramId)) { const byId = await supabase.from('orders').select('internal_notes').eq('id', paramId).maybeSingle(); current = byId.data; findError = byId.error; }
   if (findError || !current) return res.status(404).json({ error: 'Order not found' });
   const card_details = { ...req.body, balanceUSD: Number(req.body?.balanceUSD ?? 0) || undefined, deliveredAt: new Date().toISOString() };
-  const linkedOrder = await supabase.from('orders').select('amount_usd, product_category').eq('order_id', req.params.id.toUpperCase()).maybeSingle();
+  const linkedOrder = await supabase.from('orders').select('amount_usd, product_category').eq('order_id', paramId.toUpperCase()).maybeSingle();
   if (linkedOrder.data?.product_category === 'virtual_cards_reloadable') card_details.balanceUSD = Number(linkedOrder.data.amount_usd || 0);
   const updates = { status: 'Completed', card_details, updated_at: new Date().toISOString(), internal_notes: `${current.internal_notes || ''}\n[Card Issued ${new Date().toISOString()}]`.trim() };
-  let query = supabase.from('orders').update(updates).eq('order_id', req.params.id.toUpperCase()).select().single();
+  let query = supabase.from('orders').update(updates).eq('order_id', paramId.toUpperCase()).select().single();
   let { data, error } = await query;
-  if (error && /^[0-9a-f-]{36}$/i.test(req.params.id)) { data = (await supabase.from('orders').update(updates).eq('id', req.params.id).select().single()).data; error = null; }
+  if (error && /^[0-9a-f-]{36}$/i.test(paramId)) { data = (await supabase.from('orders').update(updates).eq('id', paramId).select().single()).data; error = null; }
   if (error || !data) return res.status(400).json({ error: error?.message || 'Order not found' });
   res.json(normalizeOrder(data));
 });
@@ -394,8 +398,9 @@ app.post('/api/reloads', async (req, res) => {
 app.get('/api/reloads', requireAdmin, async (_req,res) => { const {data,error}=await supabase.from('reload_transactions').select('*').order('created_at',{ascending:false}); if(error)return res.status(500).json({error:error.message}); res.json(data||[]); });
 
 app.patch('/api/reloads/:id/status', requireAdmin, async (req,res) => {
+  const paramId = String(req.params.id);
   const status = req.body?.status; if (!['Approved','Rejected'].includes(status)) return res.status(400).json({error:'Invalid reload status'});
-  const {data: reload,error: findError}=await supabase.from('reload_transactions').select('*').eq('reload_id',req.params.id.toUpperCase()).maybeSingle();
+  const {data: reload,error: findError}=await supabase.from('reload_transactions').select('*').eq('reload_id',paramId.toUpperCase()).maybeSingle();
   if(findError||!reload)return res.status(404).json({error:'Reload transaction not found'});
   if(reload.status === 'Approved') return res.status(409).json({error:'Reload already approved'});
   if(status === 'Approved') {
