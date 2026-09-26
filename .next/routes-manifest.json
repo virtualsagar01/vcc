@@ -18,7 +18,16 @@
     "afterFiles": [],
     "fallback": []
   },
-  "dynamicRoutes": [],
+  "dynamicRoutes": [
+    {
+      "page": "/posts/[...slug]",
+      "regex": "^/posts/(.+?)(?:/)?$",
+      "routeKeys": {
+        "nxtPslug": "nxtPslug"
+      },
+      "namedRegex": "^/posts/(?<nxtPslug>.+?)(?:/)?$"
+    }
+  ],
   "staticRoutes": [
     {
       "page": "/",
@@ -31,6 +40,18 @@
       "regex": "^/_not\\-found(?:/)?$",
       "routeKeys": {},
       "namedRegex": "^/_not\\-found(?:/)?$"
+    },
+    {
+      "page": "/fkinr",
+      "regex": "^/fkinr(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/fkinr(?:/)?$"
+    },
+    {
+      "page": "/posts",
+      "regex": "^/posts(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/posts(?:/)?$"
     }
   ],
   "dataRoutes": [],
