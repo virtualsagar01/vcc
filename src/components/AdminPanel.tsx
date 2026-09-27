@@ -32,21 +32,13 @@ import {
   saveProducts,
   saveSettings,
   setAdminAuthenticated,
+  isAdminAuthenticated,
 } from '../utils/storage';
 import {
   apiIssueCard,
   apiUpdateOrderStatus,
   apiUpdateSettings,
   apiSyncLiveExchangeRate,
-  apiCreateProduct,
-  apiUpdateProduct,
-  apiDeleteProduct,
-  apiAdminLogin,
-  apiAdminLogout,
-  hasAdminSession,
-  apiUploadImage,
-  apiFetchReloadTransactions,
-  apiApproveReload,
 } from '../utils/api';
 
 interface AdminPanelProps {
@@ -67,16 +59,13 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
   onClose,
   onRefreshData,
 }) => {
-  const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
-
-  React.useEffect(() => { setIsAuthenticated(hasAdminSession()); }, []);
+  const [isAuthenticated, setIsAuthenticated] = useState<boolean>(isAdminAuthenticated());
+  const [email, setEmail] = useState('admin@virtualcardnepal.com');
   const [password, setPassword] = useState('');
   const [loginError, setLoginError] = useState('');
 
   // Tabs: 'dashboard' | 'orders' | 'products' | 'settings' | 'supabase_sql'
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'orders' | 'transactions' | 'products' | 'settings' | 'supabase_sql'>('dashboard');
-  const [reloadTransactions, setReloadTransactions] = useState<any[]>([]);
-  React.useEffect(() => { if (isAuthenticated && activeTab === 'transactions') apiFetchReloadTransactions().then(setReloadTransactions).catch(console.error); }, [isAuthenticated, activeTab]);
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'orders' | 'products' | 'settings' | 'supabase_sql'>('dashboard');
 
   // Selected Order for viewing / modifying
   const [selectedOrder, setSelectedOrder] = useState<Order | null>(null);
@@ -144,17 +133,19 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
   if (!isOpen) return null;
 
   // Handle Login
-  const handleLogin = async (e: React.FormEvent) => {
+  const handleLogin = (e: React.FormEvent) => {
     e.preventDefault();
-    setLoginError('');
-    try { await apiAdminLogin(password); } catch (error: any) { setLoginError(error?.message || 'Invalid admin credentials.'); return; }
-    setIsAuthenticated(true);
-    setAdminAuthenticated(true);
-    onRefreshData();
+    const adminPassword = import.meta.env.VITE_ADMIN_PASSWORD;
+    if (email.trim() && password === adminPassword) {
+      setIsAuthenticated(true);
+      setAdminAuthenticated(true);
+      setLoginError('');
+    } else {
+      setLoginError('Invalid credentials.');
+    }
   };
 
-  const handleLogout = async () => {
-    apiAdminLogout();
+  const handleLogout = () => {
     setIsAuthenticated(false);
     setAdminAuthenticated(false);
   };
@@ -234,7 +225,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
   };
 
   // Save Product (Create or Edit)
-  const handleSaveProduct = async (e: React.FormEvent) => {
+  const handleSaveProduct = (e: React.FormEvent) => {
     e.preventDefault();
     if (!editingProduct) return;
 
@@ -245,31 +236,18 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
       updatedList = products.map((p) => (p.id === editingProduct.id ? editingProduct : p));
     }
 
-    try {
-      if (isCreatingProduct) {
-        await apiCreateProduct(editingProduct);
-      } else {
-        await apiUpdateProduct(editingProduct);
-      }
-      saveProducts(updatedList);
-      setEditingProduct(null);
-      setIsCreatingProduct(false);
-      onRefreshData();
-    } catch (error: any) {
-      alert(error?.message || 'Failed to save product.');
-    }
+    saveProducts(updatedList);
+    setEditingProduct(null);
+    setIsCreatingProduct(false);
+    onRefreshData();
   };
 
   // Delete product
-  const handleDeleteProduct = async (prodId: string) => {
-    if (!confirm('Are you sure you want to delete this product?')) return;
-    try {
-      await apiDeleteProduct(prodId);
+  const handleDeleteProduct = (prodId: string) => {
+    if (confirm('Are you sure you want to delete this product?')) {
       const updated = products.filter((p) => p.id !== prodId);
       saveProducts(updated);
       onRefreshData();
-    } catch (error: any) {
-      alert(error?.message || 'Failed to delete product.');
     }
   };
 
@@ -292,7 +270,69 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
     return matchesStatus && matchesSearch;
   });
 
-  const supabaseSchemaSQL = "-- Virtual Card Nepal \u2014 Supabase schema\n-- Run this once in Supabase SQL Editor.\n\ncreate extension if not exists pgcrypto;\n\ncreate sequence if not exists vcn_order_sequence start 1;\n\ncreate table if not exists products (\n  id uuid primary key default gen_random_uuid(),\n  name text not null,\n  slug text,\n  category text,\n  category_label text,\n  description text,\n  short_description text,\n  image_url text,\n  theme_accent text,\n  base_usd numeric(10,2) default 0,\n  issuance_fee_usd numeric(10,2) default 0,\n  funding_fee_percent numeric(5,2) default 0,\n  processing_fee_usd numeric(10,2) default 0,\n  is_virtual boolean default false,\n  min_amount numeric(10,2),\n  max_amount numeric(10,2),\n  denominations jsonb default '[]'::jsonb,\n  features jsonb default '[]'::jsonb,\n  validity text,\n  delivery_time text,\n  starting_price_npr numeric(12,2) default 0,\n  badge_text text,\n  support_note text,\n  active boolean default true,\n  display_order int default 0,\n  created_at timestamptz default now()\n);\n\ncreate table if not exists orders (\n  id uuid primary key default gen_random_uuid(),\n  order_id text unique not null,\n  customer_name text not null,\n  customer_email text not null,\n  customer_phone text,\n  card_name text,\n  billing_address text,\n  product_id uuid references products(id) on delete set null,\n  product_name text,\n  product_category text,\n  amount_usd numeric(10,2),\n  total_npr numeric(12,2),\n  payment_screenshot_url text,\n  payment_method text default 'esewa',\n  transaction_id text,\n  transaction_url text,\n  status text default 'Pending Verification',\n  notes text,\n  internal_notes text,\n  card_details jsonb,\n  created_at timestamptz default now(),\n  updated_at timestamptz\n);\n\ncreate table if not exists settings (\n  id int primary key default 1,\n  brand_name text default 'Virtual Card Nepal',\n  brand_tagline text default 'Black Matte Platinum Virtual Dollar Cards & Gift Cards',\n  custom_domain text default '',\n  exchange_rate numeric(10,2) default 173.00,\n  commission_percent numeric(5,2) default 4.00,\n  live_forex_rate numeric(10,2),\n  markup_percent numeric(5,2),\n  auto_sync_live_rate boolean default false,\n  rate_last_synced timestamptz,\n  esewa_qr_url text,\n  esewa_id text,\n  esewa_account_name text,\n  contact_whatsapp text,\n  contact_email text,\n  contact_telegram text,\n  contact_phone text,\n  social_facebook text,\n  social_instagram text,\n  social_tiktok text,\n  social_youtube text,\n  store_notice text,\n  footer_text text,\n  support_hours text,\n  crypto_payment_address text,\n  crypto_payment_network text,\n  updated_at timestamptz,\n  constraint settings_single_row check (id = 1)\n);\n\ninsert into settings (id, exchange_rate, commission_percent, brand_name)\nvalues (1, 173.00, 4.00, 'Virtual Card Nepal')\non conflict (id) do nothing;\n\n-- Generate VCN-YYYY-0001 style IDs atomically.\ncreate or replace function next_order_number()\nreturns bigint\nlanguage sql\nsecurity definer\nas $$ select nextval('vcn_order_sequence'); $$;\n\ngrant execute on function next_order_number() to anon, authenticated, service_role;\n\n-- Storage bucket used by checkout uploads.\ninsert into storage.buckets (id, name, public)\nvalues ('payment-screenshots', 'payment-screenshots', true)\non conflict (id) do update set public = true;\n\n-- Public catalog/settings reads are handled by Render using the service role.\n-- Keep tables inaccessible to browser clients so the service role is the only DB writer.\nalter table products enable row level security;\nalter table orders enable row level security;\nalter table settings enable row level security;\n\ndrop policy if exists \"public products read\" on products;\ndrop policy if exists \"public settings read\" on settings;\n\n-- No anon/authenticated table policies are required because the app talks to Postgres through Render.\n-- Admin authentication is handled entirely by Render; the client receives only a short-lived signed session token.\n";
+  const supabaseSchemaSQL = `-- Supabase Postgres Schema for Virtual Card Nepal
+
+-- 1. Products table
+CREATE TABLE products (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  name TEXT NOT NULL,
+  description TEXT,
+  category TEXT,
+  image_url TEXT,
+  base_usd DECIMAL(10,2) DEFAULT 0,
+  issuance_fee_usd DECIMAL(10,2) DEFAULT 0,
+  funding_fee_percent DECIMAL(5,2) DEFAULT 0,
+  processing_fee_usd DECIMAL(10,2) DEFAULT 0,
+  is_virtual BOOLEAN DEFAULT false,
+  min_amount DECIMAL(10,2),
+  max_amount DECIMAL(10,2),
+  denominations JSONB, -- e.g., [5,10,25,50,100]
+  created_at TIMESTAMPTZ DEFAULT now()
+);
+
+-- 2. Orders table
+CREATE TABLE orders (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  order_id TEXT UNIQUE NOT NULL, -- human readable e.g. VCN-2026-0001
+  customer_name TEXT NOT NULL,
+  customer_email TEXT NOT NULL,
+  customer_phone TEXT,
+  card_name TEXT,
+  billing_address TEXT,
+  product_id UUID REFERENCES products(id),
+  amount_usd DECIMAL(10,2),
+  total_npr DECIMAL(12,2),
+  payment_screenshot_url TEXT,
+  status TEXT DEFAULT 'Pending Verification',
+  notes TEXT,
+  internal_notes TEXT,
+  card_details JSONB,
+  created_at TIMESTAMPTZ DEFAULT now()
+);
+
+-- 3. Settings table (singleton)
+CREATE TABLE settings (
+  id INT PRIMARY KEY DEFAULT 1,
+  exchange_rate DECIMAL(10,2) DEFAULT 173.00,
+  commission_percent DECIMAL(5,2) DEFAULT 4.00,
+  esewa_qr_url TEXT,
+  esewa_id TEXT DEFAULT '9841234567',
+  contact_whatsapp TEXT,
+  contact_email TEXT,
+  contact_telegram TEXT,
+  CONSTRAINT single_row CHECK (id = 1)
+);
+
+-- 4. Initial Settings Seed
+INSERT INTO settings (id, exchange_rate, commission_percent, esewa_id, contact_whatsapp, contact_email, contact_telegram)
+VALUES (1, 173.00, 4.00, '9841234567', '+977 9841234567', 'support@virtualcardnepal.com', '@VirtualCardNepal')
+ON CONFLICT (id) DO NOTHING;
+
+-- 5. Storage bucket setup
+INSERT INTO storage.buckets (id, name, public) 
+VALUES ('payment-screenshots', 'payment-screenshots', true)
+ON CONFLICT (id) DO NOTHING;
+`;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-2 sm:p-4 overflow-y-auto bg-black/95 backdrop-blur-md">
@@ -361,7 +401,18 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
               )}
 
               <div>
-                <label className="block text-xs font-semibold text-neutral-300 mb-1">Admin Password</label>
+                <label className="block text-xs font-semibold text-neutral-300 mb-1">Admin Email</label>
+                <input
+                  type="email"
+                  required
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  className="w-full rounded-lg bg-neutral-900 border border-white/15 px-3 py-2.5 text-xs sm:text-sm text-white focus:border-[#D4AF37] focus:outline-none"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-neutral-300 mb-1">Password</label>
                 <input
                   type="password"
                   required
@@ -382,6 +433,17 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                 Sign In to Admin Panel
               </button>
 
+              {/* Quick Demo Fill */}
+              <button
+                type="button"
+                onClick={() => {
+                  setEmail('admin@virtualcardnepal.com');
+                  setPassword('admin123');
+                }}
+                className="w-full text-center text-xs text-amber-300/80 hover:text-amber-200 underline pt-2"
+              >
+                Auto-fill demo credentials (password: admin123)
+              </button>
 
               {/* Secret Admin Route Notice */}
               <div className="mt-4 p-3 rounded-xl bg-neutral-900/90 border border-white/10 text-center space-y-1 text-xs">
@@ -432,8 +494,6 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                   </span>
                 )}
               </button>
-
-              <button type="button" onClick={() => setActiveTab('transactions')} className={`flex items-center justify-between rounded-xl px-3.5 py-2.5 text-xs font-semibold transition-all shrink-0 ${activeTab === 'transactions' ? 'bg-[#D4AF37]/15 text-[#F3E5AB] border border-[#D4AF37]/30' : 'text-neutral-400 hover:text-white hover:bg-neutral-900'}`}><div className="flex items-center gap-2.5"><RefreshCw className="h-4 w-4"/><span>Transactions</span></div><span className="rounded-full bg-indigo-500/20 text-indigo-300 px-1.5 py-0.2 text-[10px]">{reloadTransactions.filter((r:any)=>r.status==='Pending Verification').length}</span></button>
 
               <button
                 type="button"
@@ -734,13 +794,6 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                 </div>
               )}
 
-              {activeTab === 'transactions' && (
-                <div className="space-y-4">
-                  <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2"><div><h3 className="text-lg font-black text-white">Reload & Payment Transactions</h3><p className="text-xs text-neutral-500">Crypto TXIDs, explorer links, eSewa receipts and card balance reloads.</p></div><button onClick={()=>apiFetchReloadTransactions().then(setReloadTransactions)} className="rounded-xl bg-neutral-800 px-3 py-2 text-xs text-white">Refresh</button></div>
-                  <div className="rounded-2xl border border-white/10 overflow-x-auto bg-neutral-950"><table className="w-full min-w-[850px] text-left text-xs"><thead className="bg-black/50 text-neutral-500"><tr><th className="p-3">Reload ID</th><th>Customer</th><th>Amount</th><th>Method / TXID</th><th>Status</th><th>Action</th></tr></thead><tbody>{reloadTransactions.length===0?<tr><td colSpan={6} className="p-8 text-center text-neutral-500">No reload transactions yet.</td></tr>:reloadTransactions.map((r:any)=><tr key={r.id} className="border-t border-white/5"><td className="p-3 font-mono text-[#F3E5AB]">{r.reload_id}<div className="text-[9px] text-neutral-600">{r.order_id}</div></td><td><div className="text-white">{r.customer_name}</div><div className="text-neutral-500">{r.customer_email}</div></td><td className="font-mono text-emerald-300">${r.amount_usd}<div className="text-neutral-500">Rs. {Number(r.total_npr).toLocaleString()}</div></td><td><div className="uppercase text-neutral-300">{r.payment_method}</div><div className="font-mono text-[10px] text-indigo-300 max-w-[220px] truncate">{r.transaction_id || 'eSewa receipt'}</div>{r.transaction_url&&<a href={r.transaction_url} target="_blank" rel="noreferrer" className="text-[10px] text-sky-400">Open explorer ↗</a>}</td><td><span className="rounded-full border border-white/10 px-2 py-1 text-[10px]">{r.status}</span></td><td><div className="flex gap-2">{r.status==='Pending Verification'&&<><button onClick={async()=>{await apiApproveReload(r.reload_id,'Approved','Payment verified by admin');const x=await apiFetchReloadTransactions();setReloadTransactions(x);onRefreshData();}} className="rounded-lg bg-emerald-600 px-2.5 py-1.5 text-[10px] font-bold text-white">Approve</button><button onClick={async()=>{await apiApproveReload(r.reload_id,'Rejected','Payment rejected by admin');setReloadTransactions(await apiFetchReloadTransactions());}} className="rounded-lg bg-red-900 px-2.5 py-1.5 text-[10px] font-bold text-red-200">Reject</button></>}</div></td></tr>)}</tbody></table></div>
-                </div>
-              )}
-
               {/* 3. PRODUCTS MANAGEMENT TAB */}
               {activeTab === 'products' && (
                 <div className="space-y-4">
@@ -754,11 +807,11 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                       onClick={() => {
                         setIsCreatingProduct(true);
                         setEditingProduct({
-                          id: crypto.randomUUID(),
+                          id: `prod-${Date.now()}`,
                           name: '',
                           slug: '',
-                          category: 'virtual_cards_reloadable',
-                          category_label: 'Virtual Cards — Reloadable',
+                          category: 'virtual_cards',
+                          category_label: 'Virtual Cards',
                           description: '',
                           short_description: '',
                           image_url: 'virtual-card',
@@ -870,6 +923,40 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                         <span>Settings saved successfully! All store prices recalculated.</span>
                       </div>
                     )}
+
+                    {/* Branding Settings */}
+                    <div className="rounded-xl border border-white/10 bg-black/40 p-4 space-y-3">
+                      <h3 className="text-sm font-bold text-white tracking-wide">Branding & Footer</h3>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                        <div>
+                          <label className="block text-xs font-medium text-neutral-300 mb-1">Brand Name</label>
+                          <input
+                            type="text"
+                            value={settingsForm.brand_name}
+                            onChange={(e) => setSettingsForm({ ...settingsForm, brand_name: e.target.value })}
+                            className="w-full rounded-lg bg-neutral-900 border border-white/15 px-3 py-2 text-xs text-white"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-xs font-medium text-neutral-300 mb-1">Brand Tagline</label>
+                          <input
+                            type="text"
+                            value={settingsForm.brand_tagline}
+                            onChange={(e) => setSettingsForm({ ...settingsForm, brand_tagline: e.target.value })}
+                            className="w-full rounded-lg bg-neutral-900 border border-white/15 px-3 py-2 text-xs text-white"
+                          />
+                        </div>
+                      </div>
+                      <div>
+                        <label className="block text-xs font-medium text-neutral-300 mb-1">Footer Text</label>
+                        <textarea
+                          value={settingsForm.footer_text}
+                          onChange={(e) => setSettingsForm({ ...settingsForm, footer_text: e.target.value })}
+                          className="w-full rounded-lg bg-neutral-900 border border-white/15 px-3 py-2 text-xs text-white"
+                          rows={3}
+                        />
+                      </div>
+                    </div>
 
                     {/* Loyal Customer 6-7% Forex Automation Box */}
                     <div className="rounded-xl border border-emerald-500/30 bg-emerald-950/20 p-4 space-y-3">
@@ -1117,23 +1204,6 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                       />
                     </div>
 
-                    <div className="rounded-xl border border-white/10 bg-black/30 p-4 space-y-3">
-                      <div className="flex items-center justify-between">
-                        <div><h4 className="text-sm font-bold text-white">Payment Methods</h4><p className="text-[10px] text-neutral-500">Enable, edit, or remove customer payment methods.</p></div>
-                        <button type="button" onClick={() => setSettingsForm({ ...settingsForm, payment_methods: [...(settingsForm.payment_methods || []), { id: crypto.randomUUID(), name: 'New Method', type: 'other', enabled: true, instructions: '' }] })} className="rounded-lg bg-neutral-800 px-3 py-1.5 text-xs font-semibold text-white">+ Add</button>
-                      </div>
-                      {(settingsForm.payment_methods || []).map((method, index) => (
-                        <div key={method.id} className="grid grid-cols-1 sm:grid-cols-6 gap-2 rounded-lg border border-white/5 bg-neutral-900/60 p-3">
-                          <input value={method.name} onChange={(e) => { const a=[...(settingsForm.payment_methods||[])]; a[index]={...a[index],name:e.target.value}; setSettingsForm({...settingsForm,payment_methods:a}); }} className="sm:col-span-2 rounded bg-neutral-950 border border-white/10 px-2 py-1.5 text-white text-xs" placeholder="Method name" />
-                          <select value={method.type} onChange={(e) => { const a=[...(settingsForm.payment_methods||[])]; a[index]={...a[index],type:e.target.value as any}; setSettingsForm({...settingsForm,payment_methods:a}); }} className="rounded bg-neutral-950 border border-white/10 px-2 py-1.5 text-white text-xs"><option value="esewa">eSewa</option><option value="crypto">Crypto</option><option value="bank">Bank</option><option value="other">Other</option></select>
-                          <input value={method.wallet_address || ''} onChange={(e) => { const a=[...(settingsForm.payment_methods||[])]; a[index]={...a[index],wallet_address:e.target.value}; setSettingsForm({...settingsForm,payment_methods:a}); }} className="sm:col-span-2 rounded bg-neutral-950 border border-white/10 px-2 py-1.5 text-white text-xs" placeholder="Wallet / account / QR URL" />
-                          <label className="rounded bg-neutral-950 border border-white/10 px-2 py-1.5 text-[10px] text-neutral-400 cursor-pointer">Upload QR<input type="file" accept="image/*" className="hidden" onChange={async(e)=>{const f=e.target.files?.[0];if(!f)return;const r=new FileReader();r.onload=async()=>{try{const url=await apiUploadImage(String(r.result),'payment-methods');const a=[...(settingsForm.payment_methods||[])];a[index]={...a[index],qr_url:url};setSettingsForm({...settingsForm,payment_methods:a});}catch(err:any){alert(err.message)}};r.readAsDataURL(f)}}/></label>
-                          <div className="flex items-center gap-2"><label className="flex items-center gap-1 text-[10px] text-neutral-300"><input type="checkbox" checked={method.enabled} onChange={(e) => { const a=[...(settingsForm.payment_methods||[])]; a[index]={...a[index],enabled:e.target.checked}; setSettingsForm({...settingsForm,payment_methods:a}); }} /> Enabled</label><button type="button" onClick={() => { const a=[...(settingsForm.payment_methods||[])]; a.splice(index,1); setSettingsForm({...settingsForm,payment_methods:a}); }} className="text-red-400 text-[10px]">Remove</button></div>
-                          <textarea value={method.instructions || ''} onChange={(e) => { const a=[...(settingsForm.payment_methods||[])]; a[index]={...a[index],instructions:e.target.value}; setSettingsForm({...settingsForm,payment_methods:a}); }} className="sm:col-span-5 rounded bg-neutral-950 border border-white/10 px-2 py-1.5 text-white text-xs" placeholder="Customer payment instructions" rows={2} />
-                        </div>
-                      ))}
-                    </div>
-
                     <button
                       type="submit"
                       className="w-full rounded-xl py-3 font-bold text-black text-xs sm:text-sm uppercase tracking-wider transition-all"
@@ -1342,7 +1412,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                         <CreditCard className="h-4 w-4 text-[#D4AF37]" />
                         <span>Issue Card / Voucher Credentials</span>
                       </div>
-                      {(selectedOrder.product_category === 'virtual_cards_reloadable' || selectedOrder.product_category === 'virtual_cards_preloaded') && (
+                      {(selectedOrder.product_category === 'virtual_cards' || selectedOrder.product_category === 'prepaid_cards') && (
                         <button
                           type="button"
                           onClick={() => {
@@ -1362,7 +1432,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                       )}
                     </div>
 
-                    {selectedOrder.product_category === 'virtual_cards_reloadable' || selectedOrder.product_category === 'virtual_cards_preloaded' ? (
+                    {selectedOrder.product_category === 'virtual_cards' || selectedOrder.product_category === 'prepaid_cards' ? (
                       <>
                         <div>
                           <label className="block text-[10px] text-neutral-400">Card Number (16 Digits)</label>
@@ -1494,10 +1564,11 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                       onChange={(e) => {
                         const cat = e.target.value as ProductCategory;
                         const labels: Record<ProductCategory, string> = {
-                          virtual_cards_preloaded: 'Virtual Cards — Preloaded',
-                          virtual_cards_reloadable: 'Virtual Cards — Reloadable',
-                          gift_cards: 'Gift Cards — General',
-                          gift_cards_apple: 'Gift Cards — iTunes / Apple',
+                          virtual_cards: 'Virtual Cards',
+                          prepaid_cards: 'Prepaid Cards',
+                          preloaded_cards: 'Preloaded Cards',
+                          google_gift_cards: 'Google Gift Cards',
+                          other_gift_cards: 'Other Gift Cards',
                           game_topups: 'Game Top-ups',
                         };
                         setEditingProduct({
@@ -1508,10 +1579,11 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                       }}
                       className="w-full rounded bg-neutral-900 border border-white/15 px-3 py-2 text-white"
                     >
-                      <option value="virtual_cards_preloaded">Virtual Cards — Preloaded</option>
-                      <option value="virtual_cards_reloadable">Virtual Cards — Reloadable</option>
-                      <option value="gift_cards">Gift Cards — General</option>
-                      <option value="gift_cards_apple">Gift Cards — iTunes / Apple</option>
+                      <option value="virtual_cards">Virtual Cards</option>
+                      <option value="prepaid_cards">Prepaid Cards</option>
+                      <option value="preloaded_cards">Preloaded Cards</option>
+                      <option value="google_gift_cards">Google Gift Cards</option>
+                      <option value="other_gift_cards">Other Gift Cards</option>
                       <option value="game_topups">Game Top-ups</option>
                     </select>
                   </div>
@@ -1529,15 +1601,6 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                       <option value="false">No (Fixed Denominations)</option>
                     </select>
                   </div>
-                </div>
-
-                <div className="rounded-lg border border-white/10 bg-black/30 p-3">
-                  <label className="block text-neutral-300 font-semibold mb-1">Service Thumbnail</label>
-                  <div className="flex flex-col sm:flex-row gap-3 sm:items-center">
-                    {editingProduct.image_url && /^https?:/.test(editingProduct.image_url) && <img src={editingProduct.image_url} className="h-20 w-20 rounded-xl object-cover border border-white/10" />}
-                    <input type="file" accept="image/*" className="text-xs text-neutral-400" onChange={async (e) => { const file=e.target.files?.[0]; if(!file)return; const reader=new FileReader(); reader.onload=async()=>{ try { const url=await apiUploadImage(String(reader.result),'products'); setEditingProduct({...editingProduct,image_url:url}); } catch(err:any){ alert(err.message); } }; reader.readAsDataURL(file); }} />
-                  </div>
-                  <p className="text-[10px] text-neutral-500 mt-1">Upload a storefront image; it is stored in Supabase Storage and immediately used by the product.</p>
                 </div>
 
                 {/* Fees Configuration */}
@@ -1580,13 +1643,6 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                       className="w-full rounded bg-neutral-900 border border-white/15 px-2.5 py-1.5 text-white"
                     />
                   </div>
-                </div>
-
-                <div className="grid grid-cols-2 gap-3">
-                  <label className="flex items-center gap-2 rounded bg-neutral-900 border border-white/10 px-3 py-2 text-neutral-300">
-                    <input type="checkbox" checked={editingProduct.active !== false} onChange={(e) => setEditingProduct({ ...editingProduct, active: e.target.checked })} /> Active on storefront
-                  </label>
-                  <div><label className="block text-neutral-400 text-[10px]">Display Order</label><input type="number" value={editingProduct.display_order ?? 0} onChange={(e) => setEditingProduct({ ...editingProduct, display_order: Number(e.target.value) })} className="w-full rounded bg-neutral-900 border border-white/15 px-2.5 py-1.5 text-white" /></div>
                 </div>
 
                 <div>

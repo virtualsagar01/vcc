@@ -1,424 +1,483 @@
-import 'dotenv/config';
 import express from 'express';
-import crypto from 'node:crypto';
-import cors from 'cors';
-import { createClient, SupabaseClient } from '@supabase/supabase-js';
-import { Product, Order, AppSettings } from './src/types';
-import { DEFAULT_SETTINGS, INITIAL_PRODUCTS } from './src/utils/storage';
+import path from 'path';
+import fs from 'fs';
+import { createServer as createViteServer } from 'vite';
+import { initializeApp } from 'firebase-admin/app';
+import { getFirestore, Firestore } from 'firebase-admin/firestore';
+import { Order, Product, AppSettings } from './src/types';
+import { DEFAULT_SETTINGS, INITIAL_PRODUCTS, INITIAL_ORDERS } from './src/utils/storage';
 
-const PORT = Number(process.env.PORT || 3000);
-const SUPABASE_URL = process.env.SUPABASE_URL || '';
-const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
-const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || '';
-const ADMIN_TOKEN_SECRET = process.env.ADMIN_TOKEN_SECRET || SUPABASE_SERVICE_ROLE_KEY;
-const ADMIN_TOKEN_TTL_SECONDS = 60 * 60 * 12;
-const STORAGE_BUCKET = process.env.SUPABASE_STORAGE_BUCKET || 'payment-screenshots';
+// const __filename = fileURLToPath(import.meta.url);
+// const __dirname = path.dirname(__filename);
 
-if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
-  console.warn('[Backend] SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY are not configured.');
+// Works safely in both bundled CJS and ES modules
+const currentDir = typeof __dirname !== 'undefined' 
+  ? __dirname 
+  : path.resolve();
+
+const PORT = 3000;
+
+// Initialize Firebase Admin lazily
+let adminDb: Firestore | null = null;
+function getAdminDb() {
+  if (!adminDb) {
+    initializeApp();
+    adminDb = getFirestore();
+  }
+  return adminDb;
 }
 
-const supabase: SupabaseClient = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
-  auth: { autoRefreshToken: false, persistSession: false },
-});
+// Database wrapper functions interacting with Firestore
+async function readDb(): Promise<{ settings: AppSettings; products: Product[]; orders: Order[] }> {
+  const db = getAdminDb();
+  const [settingsSnap, productsSnap, ordersSnap] = await Promise.all([
+    db.collection('settings').doc('config').get(),
+    db.collection('products').get(),
+    db.collection('orders').get(),
+  ]);
 
-const app = express();
-app.use(cors({ origin: (process.env.FRONTEND_URL || '*').split(',').map(s => s.trim()), credentials: true }));
-app.use(express.json({ limit: '12mb' }));
-app.use(express.urlencoded({ extended: true, limit: '12mb' }));
-
-function normalizeProduct(row: any): Product {
   return {
-    id: row.id,
-    name: row.name,
-    slug: row.slug || String(row.name || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, ''),
-    category: row.category || 'gift_cards',
-    category_label: row.category_label || String(row.category || '').replace(/_/g, ' '),
-    description: row.description || '',
-    short_description: row.short_description || row.description || '',
-    image_url: row.image_url || 'gift-card',
-    theme_accent: row.theme_accent || 'gold',
-    base_usd: Number(row.base_usd || 0),
-    issuance_fee_usd: Number(row.issuance_fee_usd || 0),
-    funding_fee_percent: Number(row.funding_fee_percent || 0),
-    processing_fee_usd: Number(row.processing_fee_usd || 0),
-    is_virtual: Boolean(row.is_virtual),
-    min_amount: Number(row.min_amount || 0),
-    max_amount: Number(row.max_amount || 0),
-    denominations: Array.isArray(row.denominations) ? row.denominations.map(Number) : [],
-    features: Array.isArray(row.features) ? row.features : [],
-    validity: row.validity || 'Instant',
-    delivery_time: row.delivery_time || 'Instant',
-    starting_price_npr: Number(row.starting_price_npr || 0),
-    active: row.active !== false,
-    display_order: Number(row.display_order || 0),
-    badge_text: row.badge_text || undefined,
-    support_note: row.support_note || undefined,
-  } as Product;
-}
-
-function normalizeSettings(row: any): AppSettings {
-  return { ...DEFAULT_SETTINGS, ...(row || {}), id: 1 } as AppSettings;
-}
-
-function normalizeOrder(row: any): Order {
-  return {
-    ...row,
-    amount_usd: Number(row.amount_usd || 0),
-    total_npr: Number(row.total_npr || 0),
-    product_category: row.product_category || 'gift_cards',
-    payment_method: row.payment_method || 'esewa',
-    card_details: row.card_details || undefined,
-  } as Order;
-}
-
-function signAdminToken(payload: { sub: string; exp: number }) {
-  const body = Buffer.from(JSON.stringify(payload)).toString('base64url');
-  const signature = crypto.createHmac('sha256', ADMIN_TOKEN_SECRET).update(body).digest('base64url');
-  return `${body}.${signature}`;
-}
-
-function verifyAdminToken(token: string) {
-  const [body, signature] = token.split('.');
-  if (!body || !signature || !ADMIN_TOKEN_SECRET) return false;
-  const expected = crypto.createHmac('sha256', ADMIN_TOKEN_SECRET).update(body).digest('base64url');
-  if (signature.length !== expected.length || !crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected))) return false;
-  try {
-    const payload = JSON.parse(Buffer.from(body, 'base64url').toString('utf8'));
-    return payload?.sub === 'admin' && Number(payload.exp) > Math.floor(Date.now() / 1000);
-  } catch { return false; }
-}
-
-function requireAdmin(req: express.Request, res: express.Response, next: express.NextFunction) {
-  const header = req.headers.authorization || '';
-  const token = header.startsWith('Bearer ') ? header.slice(7) : '';
-  if (!token || !verifyAdminToken(token)) return res.status(401).json({ error: 'Invalid or expired admin session' });
-  next();
-}
-
-async function seedIfNeeded() {
-  const { count, error } = await supabase.from('products').select('id', { count: 'exact', head: true });
-  if (!error && count === 0) {
-    const rows = INITIAL_PRODUCTS.map(p => ({
-      name: p.name,
-      slug: p.slug,
-      category: p.category,
-      category_label: p.category_label,
-      description: p.description,
-      short_description: p.short_description,
-      image_url: p.image_url,
-      theme_accent: p.theme_accent,
-      base_usd: p.base_usd,
-      issuance_fee_usd: p.issuance_fee_usd,
-      funding_fee_percent: p.funding_fee_percent,
-      processing_fee_usd: p.processing_fee_usd,
-      is_virtual: p.is_virtual,
-      min_amount: p.min_amount,
-      max_amount: p.max_amount,
-      denominations: p.denominations,
-      features: p.features,
-      validity: p.validity,
-      delivery_time: p.delivery_time,
-      starting_price_npr: p.starting_price_npr,
-      badge_text: p.badge_text || null,
-      support_note: p.support_note || null,
-      active: p.active !== false,
-      display_order: p.display_order ?? 0,
-    }));
-    const result = await supabase.from('products').insert(rows);
-    if (result.error) console.warn('[Backend] Product seed failed:', result.error.message);
-  }
-  const { data: settings } = await supabase.from('settings').select('*').eq('id', 1).maybeSingle();
-  if (!settings) await supabase.from('settings').upsert({ id: 1, ...DEFAULT_SETTINGS });
-}
-
-app.post('/api/uploads/image', requireAdmin, async (req, res) => {
-  try {
-    const dataUrl = String(req.body?.data_url || '');
-    const folder = String(req.body?.folder || 'products').replace(/[^a-zA-Z0-9_-]/g, '');
-    const match = dataUrl.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/);
-    if (!match) return res.status(400).json({ error: 'Invalid image data' });
-    const mime = match[1];
-    const bytes = Buffer.from(match[2], 'base64');
-    if (bytes.length > 6 * 1024 * 1024) return res.status(400).json({ error: 'Image must be under 6MB' });
-    const ext = (mime.split('/')[1] || 'jpg').replace('jpeg', 'jpg').split('+')[0];
-    const filename = `${folder}/${Date.now()}-${crypto.randomBytes(5).toString('hex')}.${ext}`;
-    const upload = await supabase.storage.from('site-assets').upload(filename, bytes, { contentType: mime, upsert: false });
-    if (upload.error) throw upload.error;
-    const url = supabase.storage.from('site-assets').getPublicUrl(filename).data.publicUrl;
-    res.json({ url });
-  } catch (e: any) { res.status(400).json({ error: e.message || 'Image upload failed' }); }
-});
-
-app.post('/api/admin/login', (req, res) => {
-  if (!ADMIN_PASSWORD || !ADMIN_TOKEN_SECRET) return res.status(503).json({ error: 'Admin authentication is not configured on the server.' });
-  const password = String(req.body?.password || '');
-  if (!password || password.length > 256) return res.status(401).json({ error: 'Invalid admin credentials.' });
-  const expected = Buffer.from(ADMIN_PASSWORD);
-  const supplied = Buffer.from(password);
-  if (expected.length !== supplied.length || !crypto.timingSafeEqual(expected, supplied)) {
-    return res.status(401).json({ error: 'Invalid admin credentials.' });
-  }
-  const exp = Math.floor(Date.now() / 1000) + ADMIN_TOKEN_TTL_SECONDS;
-  res.json({ token: signAdminToken({ sub: 'admin', exp }), expires_at: new Date(exp * 1000).toISOString() });
-});
-
-app.get('/api/health', (_req, res) => res.json({ status: 'ok', service: 'Virtual Card Nepal API', timestamp: new Date().toISOString() }));
-
-app.get('/api/settings', async (_req, res) => {
-  const { data, error } = await supabase.from('settings').select('*').eq('id', 1).maybeSingle();
-  if (error) return res.status(500).json({ error: error.message });
-  res.json(normalizeSettings(data));
-});
-
-app.get('/api/exchange-rate/live', async (_req, res) => {
-  const { data } = await supabase.from('settings').select('*').eq('id', 1).maybeSingle();
-  const settings = normalizeSettings(data);
-  res.json({
-    live_forex_rate: settings.live_forex_rate || settings.exchange_rate,
-    markup_percent: settings.markup_percent || 0,
-    store_exchange_rate: settings.exchange_rate,
-    rate_last_synced: settings.rate_last_synced || new Date().toISOString(),
-  });
-});
-
-app.post('/api/exchange-rate/sync', requireAdmin, async (req, res) => {
-  try {
-    const requestedMarkup = Number(req.body.markup_percent ?? 6.5);
-    const response = await fetch('https://open.er-api.com/v6/latest/USD');
-    const json: any = await response.json();
-    const live = Number(json?.rates?.NPR || 0);
-    if (!live) throw new Error('NPR rate unavailable');
-    const storeRate = Number((live * (1 + requestedMarkup / 100)).toFixed(2));
-    const payload = { live_forex_rate: Number(live.toFixed(2)), markup_percent: requestedMarkup, exchange_rate: storeRate, commission_percent: 0, auto_sync_live_rate: true, rate_last_synced: new Date().toISOString(), updated_at: new Date().toISOString() };
-    const { data, error } = await supabase.from('settings').upsert({ id: 1, ...payload }).select().single();
-    if (error) throw error;
-    res.json({ success: true, settings: normalizeSettings(data), result: { liveRate: live, newExchangeRate: storeRate, markupPercent: requestedMarkup } });
-  } catch (error: any) {
-    res.status(502).json({ error: error.message || 'Failed to sync exchange rate' });
-  }
-});
-
-app.put('/api/settings', requireAdmin, async (req, res) => {
-  const payload = { ...req.body, id: 1, updated_at: new Date().toISOString() };
-  const { data, error } = await supabase.from('settings').upsert(payload).select().single();
-  if (error) return res.status(500).json({ error: error.message });
-  res.json(normalizeSettings(data));
-});
-
-app.get('/api/products', async (_req, res) => {
-  const { data, error } = await supabase.from('products').select('*').order('display_order', { ascending: true }).order('created_at', { ascending: false });
-  if (error) return res.status(500).json({ error: error.message });
-  res.json((data || []).map(normalizeProduct));
-});
-
-app.post('/api/products', requireAdmin, async (req, res) => {
-  const payload = { ...req.body };
-  delete payload.id;
-  const { data, error } = await supabase.from('products').insert(payload).select().single();
-  if (error) return res.status(400).json({ error: error.message });
-  res.status(201).json(normalizeProduct(data));
-});
-
-app.put('/api/products/:id', requireAdmin, async (req, res) => {
-  const paramId = String(req.params.id);
-  const { data, error } = await supabase.from('products').update(req.body).eq('id', paramId).select().single();
-  if (error) return res.status(400).json({ error: error.message });
-  res.json(normalizeProduct(data));
-});
-
-app.delete('/api/products/:id', requireAdmin, async (req, res) => {
-  const paramId = String(req.params.id);
-  const { error } = await supabase.from('products').delete().eq('id', paramId);
-  if (error) return res.status(400).json({ error: error.message });
-  res.json({ success: true });
-});
-
-app.get('/api/orders', requireAdmin, async (_req, res) => {
-  const { data, error } = await supabase.from('orders').select('*').order('created_at', { ascending: false });
-  if (error) return res.status(500).json({ error: error.message });
-  res.json((data || []).map(normalizeOrder));
-});
-
-app.get('/api/orders/:id', async (req, res) => {
-  const q = String(req.params.id);
-  let { data } = await supabase.from('orders').select('*').eq('order_id', q.toUpperCase()).maybeSingle();
-  if (!data && /^[0-9a-f-]{36}$/i.test(q)) {
-    const byId = await supabase.from('orders').select('*').eq('id', q).maybeSingle();
-    data = byId.data;
-  }
-  if (!data) return res.status(404).json({ error: 'Order not found' });
-  const order = normalizeOrder(data);
-  // Public tracking never exposes card credentials or internal notes.
-  if (!(req.headers.authorization || '').startsWith('Bearer ')) {
-    delete (order as any).card_details;
-    delete (order as any).internal_notes;
-  }
-  res.json(order);
-});
-
-app.post('/api/orders', async (req, res) => {
-  const b = req.body || {};
-  if (!b.customer_name || !b.customer_email || !b.product_id) return res.status(400).json({ error: 'Name, email and product are required' });
-  if (b.payment_method === 'crypto' && !String(b.transaction_id || '').trim()) return res.status(400).json({ error: 'Crypto Transaction ID is required' });
-  if (b.payment_method !== 'crypto' && !b.payment_screenshot_url) return res.status(400).json({ error: 'Payment screenshot is required' });
-
-  let screenshotUrl = '';
-  try {
-    if (!b.payment_screenshot_url) { screenshotUrl = ''; } else {
-    const dataUrl = String(b.payment_screenshot_url);
-    const match = dataUrl.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/);
-    if (!match) return res.status(400).json({ error: 'Payment screenshot must be a valid image upload' });
-    const mime = match[1];
-    const ext = mime.split('/')[1].replace('jpeg', 'jpg').split('+')[0];
-    const bytes = Buffer.from(match[2], 'base64');
-    if (bytes.length > 5 * 1024 * 1024) return res.status(400).json({ error: 'Payment screenshot must be under 5MB' });
-    const filename = `${new Date().getFullYear()}/${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
-    const upload = await supabase.storage.from(STORAGE_BUCKET).upload(filename, bytes, { contentType: mime, upsert: false });
-    if (upload.error) throw upload.error;
-    const publicUrl = supabase.storage.from(STORAGE_BUCKET).getPublicUrl(filename).data.publicUrl;
-    screenshotUrl = publicUrl;
-    }
-  } catch (e: any) {
-    return res.status(400).json({ error: `Payment screenshot upload failed: ${e.message || 'unknown error'}` });
-  }
-
-  const { data: seq, error: seqError } = await supabase.rpc('next_order_number');
-  if (seqError) return res.status(500).json({ error: 'Unable to generate Order ID. Run the supplied Supabase schema first.' });
-  const year = new Date().getFullYear();
-  const order_id = `VCN-${year}-${String(Number(seq)).padStart(4, '0')}`;
-  const insertPayload = {
-    order_id,
-    customer_name: b.customer_name,
-    customer_email: b.customer_email,
-    customer_phone: b.customer_phone || null,
-    card_name: b.card_name || null,
-    billing_address: b.billing_address || null,
-    product_id: b.product_id,
-    product_name: b.product_name || null,
-    product_category: b.product_category || 'gift_cards',
-    amount_usd: Number(b.amount_usd || 0),
-    total_npr: Number(b.total_npr || 0),
-    payment_screenshot_url: screenshotUrl,
-    payment_method: b.payment_method || 'esewa',
-    transaction_id: b.transaction_id || null,
-    transaction_url: b.transaction_url || null,
-    status: 'Pending Verification',
-    notes: b.notes || null,
+    settings: (settingsSnap.data() as AppSettings) || DEFAULT_SETTINGS,
+    products: productsSnap.docs.map((doc: any) => ({ id: doc.id, ...doc.data() } as Product)),
+    orders: ordersSnap.docs.map((doc: any) => ({ id: doc.id, ...doc.data() } as Order)),
   };
-  const { data, error } = await supabase.from('orders').insert(insertPayload).select().single();
-  if (error) return res.status(500).json({ error: error.message });
-  res.status(201).json(normalizeOrder(data));
-});
+}
 
-app.patch('/api/orders/:id/status', requireAdmin, async (req, res) => {
-  const paramId = String(req.params.id);
-  const updates = { status: req.body.status, internal_notes: req.body.internal_notes, updated_at: new Date().toISOString() };
-  let query = supabase.from('orders').update(updates).eq('order_id', paramId.toUpperCase()).select().single();
-  let { data, error } = await query;
-  if (error && /^[0-9a-f-]{36}$/i.test(paramId)) { data = (await supabase.from('orders').update(updates).eq('id', paramId).select().single()).data; error = null; }
-  if (error || !data) return res.status(400).json({ error: error?.message || 'Order not found' });
-  res.json(normalizeOrder(data));
-});
+async function writeDb(data: { settings?: AppSettings; products?: Product[]; orders?: Order[] }): Promise<void> {
+  const db = getAdminDb();
+  const batch = db.batch();
+  
+  if (data.settings) {
+    batch.set(db.collection('settings').doc('config'), data.settings, { merge: true });
+  }
+  
+  if (data.products) {
+    for (const product of data.products) {
+        batch.set(db.collection('products').doc(product.id), product, { merge: true });
+    }
+  }
 
-app.post('/api/orders/:id/issue-card', requireAdmin, async (req, res) => {
-  const paramId = String(req.params.id);
-  let { data: current, error: findError } = await supabase.from('orders').select('internal_notes').eq('order_id', paramId.toUpperCase()).maybeSingle();
-  if (!current && /^[0-9a-f-]{36}$/i.test(paramId)) { const byId = await supabase.from('orders').select('internal_notes').eq('id', paramId).maybeSingle(); current = byId.data; findError = byId.error; }
-  if (findError || !current) return res.status(404).json({ error: 'Order not found' });
-  const card_details = { ...req.body, balanceUSD: Number(req.body?.balanceUSD ?? 0) || undefined, deliveredAt: new Date().toISOString() };
-  const linkedOrder = await supabase.from('orders').select('amount_usd, product_category').eq('order_id', paramId.toUpperCase()).maybeSingle();
-  if (linkedOrder.data?.product_category === 'virtual_cards_reloadable') card_details.balanceUSD = Number(linkedOrder.data.amount_usd || 0);
-  const updates = { status: 'Completed', card_details, updated_at: new Date().toISOString(), internal_notes: `${current.internal_notes || ''}\n[Card Issued ${new Date().toISOString()}]`.trim() };
-  let query = supabase.from('orders').update(updates).eq('order_id', paramId.toUpperCase()).select().single();
-  let { data, error } = await query;
-  if (error && /^[0-9a-f-]{36}$/i.test(paramId)) { data = (await supabase.from('orders').update(updates).eq('id', paramId).select().single()).data; error = null; }
-  if (error || !data) return res.status(400).json({ error: error?.message || 'Order not found' });
-  res.json(normalizeOrder(data));
-});
+  if (data.orders) {
+    for (const order of data.orders) {
+        batch.set(db.collection('orders').doc(order.id), order, { merge: true });
+    }
+  }
 
-app.post('/api/cards/lookup', async (req, res) => {
-  const identifier = String(req.body.identifier || '').trim().toLowerCase();
-  const key = String(req.body.securityKey || '').trim().toUpperCase();
-  const type = req.body.verificationType === 'cvv' ? 'cvv' : 'cardholder';
-  const { data, error } = await supabase.from('orders').select('*').or(`order_id.ilike.${identifier},customer_email.ilike.${identifier}`).eq('status', 'Completed');
-  if (error || !data?.length) return res.status(404).json({ error: 'No completed order found matching that Order ID or Email.' });
-  const verified = data.filter((row: any) => {
-    if (type === 'cvv') return String(row.card_details?.cvv || '').toUpperCase() === key;
-    const name = String(row.card_name || row.customer_name || '').toUpperCase();
-    return name.includes(key) || key.includes(name);
+  await batch.commit();
+}
+
+// Automatically synchronizes live forex market rate and applies loyal customer markup (6-7%)
+async function syncLiveForexRate(customMarkup?: number): Promise<{ liveRate: number; newExchangeRate: number; markupPercent: number }> {
+  try {
+    const response = await fetch('https://open.er-api.com/v6/latest/USD');
+    if (!response.ok) throw new Error(`Forex API status ${response.status}`);
+    const data = (await response.json()) as { rates?: { NPR?: number } };
+    const liveRate = data.rates?.NPR ? Number(data.rates.NPR.toFixed(2)) : 153.68;
+    
+    const { settings } = await readDb();
+    const markupPercent = customMarkup !== undefined 
+      ? customMarkup 
+      : (settings.markup_percent !== undefined ? settings.markup_percent : 6.5);
+    
+    // Only 6-7% more than live rate as requested for loyal customer base
+    const newExchangeRate = Number((liveRate * (1 + markupPercent / 100)).toFixed(2));
+    
+    const updatedSettings = {
+      ...settings,
+      live_forex_rate: liveRate,
+      markup_percent: markupPercent,
+      exchange_rate: newExchangeRate,
+      commission_percent: 0.0,
+      auto_sync_live_rate: true,
+      rate_last_synced: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+    await writeDb({ settings: updatedSettings });
+    console.log(`[Backend] Synced Live Forex Rate: 1 USD = Rs. ${liveRate} NPR | Loyal Store Rate (+${markupPercent}%): Rs. ${newExchangeRate} NPR`);
+    return { liveRate, newExchangeRate, markupPercent };
+  } catch (err) {
+    console.warn('[Backend] Failed to fetch live exchange rate, using fallback', err);
+    const { settings } = await readDb();
+    const liveRate = settings.live_forex_rate || 153.68;
+    const markupPercent = settings.markup_percent !== undefined ? settings.markup_percent : 6.5;
+    const newExchangeRate = Number((liveRate * (1 + markupPercent / 100)).toFixed(2));
+    return { liveRate, newExchangeRate, markupPercent };
+  }
+}
+
+async function startServer() {
+  const app = express();
+
+  // Middleware for body parsing (support large payload for payment receipt image data)
+  app.use(express.json({ limit: '15mb' }));
+  app.use(express.urlencoded({ extended: true, limit: '15mb' }));
+
+  // ==========================================
+  // BACKEND REST API ENDPOINTS (/api/*)
+  // ==========================================
+
+  // 1. Health check & system status
+  app.get('/api/health', (req, res) => {
+    res.json({
+      status: 'ok',
+      timestamp: new Date().toISOString(),
+      service: 'Virtual Card Nepal Core Backend',
+      environment: process.env.NODE_ENV || 'development',
+    });
   });
-  if (!verified.length) return res.status(401).json({ error: 'Security verification failed.' });
-  res.json({ success: true, orders: verified.map(normalizeOrder) });
-});
 
-app.post('/api/reloads', async (req, res) => {
-  const b = req.body || {};
-  const identifier = String(b.identifier || '').trim();
-  const securityKey = String(b.security_key || '').trim().toUpperCase();
-  const amount = Number(b.amount_usd || 0);
-  if (!identifier || !securityKey || !Number.isFinite(amount) || amount < 10 || amount > 20000) return res.status(400).json({ error: 'Valid card identifier, verification key and $10–$20,000 amount are required.' });
-  if (b.payment_method === 'crypto' && !String(b.transaction_id || '').trim()) return res.status(400).json({ error: 'Crypto Transaction ID is required.' });
-  if (b.payment_method === 'esewa' && !b.payment_screenshot_url) return res.status(400).json({ error: 'eSewa payment screenshot is required.' });
-  const { data: rows, error } = await supabase.from('orders').select('*').eq('status','Completed');
-  if (error) return res.status(500).json({ error: error.message });
-  const needle = identifier.toLowerCase();
-  const matches = (rows || []).filter((r:any) => {
-    const card = String(r.card_details?.cardNumber || '').replace(/\D/g,'');
-    const id = String(r.order_id || '').toLowerCase();
-    const email = String(r.customer_email || '').toLowerCase();
-    return id === needle || email === needle || (card && card === needle.replace(/\D/g,''));
-  }).filter((r:any) => String(r.product_category || '').includes('virtual_cards_reloadable') && r.card_details?.cardNumber);
-  if (!matches.length) return res.status(404).json({ error: 'No active reloadable card found for that identifier.' });
-  const order = matches.find((r:any) => String(r.card_details?.cvv || '').toUpperCase() === securityKey || String(r.card_name || r.customer_name || '').toUpperCase() === securityKey);
-  if (!order) return res.status(401).json({ error: 'Card verification failed.' });
-  let screenshotUrl = '';
-  if (b.payment_screenshot_url) {
-    const match = String(b.payment_screenshot_url).match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/);
-    if (!match) return res.status(400).json({ error: 'Invalid payment screenshot.' });
-    const mime = match[1]; const bytes = Buffer.from(match[2], 'base64');
-    if (bytes.length > 5 * 1024 * 1024) return res.status(400).json({ error: 'Screenshot must be under 5MB.' });
-    const ext = mime.split('/')[1].replace('jpeg','jpg').split('+')[0];
-    const path = `reloads/${Date.now()}-${crypto.randomBytes(4).toString('hex')}.${ext}`;
-    const up = await supabase.storage.from(STORAGE_BUCKET).upload(path, bytes, { contentType: mime, upsert:false });
-    if (up.error) return res.status(400).json({ error: up.error.message });
-    screenshotUrl = supabase.storage.from(STORAGE_BUCKET).getPublicUrl(path).data.publicUrl;
+  // 2. Settings endpoints
+  app.get('/api/settings', async (req, res) => {
+    try {
+      const db = await readDb();
+      res.json(db.settings);
+    } catch (err) {
+      res.status(500).json({ error: 'Failed to retrieve settings' });
+    }
+  });
+
+  // 2b. Live Forex & Loyal Rate Sync Endpoints
+  app.get('/api/exchange-rate/live', async (req, res) => {
+    try {
+      const db = await readDb();
+      const liveRate = db.settings.live_forex_rate || 153.68;
+      const markupPercent = db.settings.markup_percent !== undefined ? db.settings.markup_percent : 6.5;
+      const storeRate = db.settings.exchange_rate || Number((liveRate * (1 + markupPercent / 100)).toFixed(2));
+      
+      res.json({
+        live_forex_rate: liveRate,
+        markup_percent: markupPercent,
+        store_exchange_rate: storeRate,
+        rate_last_synced: db.settings.rate_last_synced || new Date().toISOString(),
+        savings_vs_traditional_banks: 'Up to Rs. 15-20 NPR saved per USD compared to black market brokers & bank cards',
+      });
+    } catch (err) {
+      res.status(500).json({ error: 'Failed to get live rate status' });
+    }
+  });
+
+  app.post('/api/exchange-rate/sync', async (req, res) => {
+    try {
+      const requestedMarkup = req.body.markup_percent !== undefined ? Number(req.body.markup_percent) : 6.5;
+      const result = await syncLiveForexRate(requestedMarkup);
+      const db = await readDb();
+      res.json({
+        success: true,
+        message: `Synced with live forex: 1 USD = Rs. ${result.liveRate} NPR (+${result.markupPercent}% markup = Rs. ${result.newExchangeRate} NPR)`,
+        settings: db.settings,
+        result,
+      });
+    } catch (err) {
+      res.status(500).json({ error: 'Failed to sync exchange rate with live market' });
+    }
+  });
+
+  app.put('/api/settings', async (req, res) => {
+    try {
+      const db = await readDb();
+      const updatedSettings: AppSettings = {
+        ...db.settings,
+        ...req.body,
+        updated_at: new Date().toISOString(),
+      };
+      await writeDb({ settings: updatedSettings });
+      res.json(updatedSettings);
+    } catch (err) {
+      res.status(500).json({ error: 'Failed to update settings' });
+    }
+  });
+
+  // 3. Products endpoints
+  app.get('/api/products', async (req, res) => {
+    try {
+      const db = await readDb();
+      res.json(db.products);
+    } catch (err) {
+      res.status(500).json({ error: 'Failed to retrieve products' });
+    }
+  });
+
+  app.post('/api/products', async (req, res) => {
+    try {
+      const db = await readDb();
+      const newProduct: Product = {
+        ...req.body,
+        id: req.body.id || `prod-${Date.now()}`,
+      };
+      db.products.push(newProduct);
+      await writeDb({ products: db.products });
+      res.status(201).json(newProduct);
+    } catch (err) {
+      res.status(500).json({ error: 'Failed to create product' });
+    }
+  });
+
+  app.put('/api/products/:id', async (req, res) => {
+    try {
+      const db = await readDb();
+      const idx = db.products.findIndex((p) => p.id === req.params.id);
+      if (idx === -1) {
+        return res.status(404).json({ error: 'Product not found' });
+      }
+      db.products[idx] = { ...db.products[idx], ...req.body };
+      await writeDb({ products: db.products });
+      res.json(db.products[idx]);
+    } catch (err) {
+      res.status(500).json({ error: 'Failed to update product' });
+    }
+  });
+
+  app.delete('/api/products/:id', async (req, res) => {
+    try {
+      const db = await readDb();
+      db.products = db.products.filter((p) => p.id !== req.params.id);
+      await writeDb({ products: db.products });
+      res.json({ success: true, message: 'Product deleted' });
+    } catch (err) {
+      res.status(500).json({ error: 'Failed to delete product' });
+    }
+  });
+
+  // 4. Orders endpoints
+  app.get('/api/orders', async (req, res) => {
+    try {
+      const db = await readDb();
+      // Return sorted with latest orders first
+      const sorted = [...db.orders].sort(
+        (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
+      );
+      res.json(sorted);
+    } catch (err) {
+      res.status(500).json({ error: 'Failed to retrieve orders' });
+    }
+  });
+
+  app.get('/api/orders/:id', async (req, res) => {
+    try {
+      const db = await readDb();
+      const query = req.params.id.toUpperCase();
+      const order = db.orders.find(
+        (o) => o.id === req.params.id || o.order_id.toUpperCase() === query
+      );
+      if (!order) {
+        return res.status(404).json({ error: 'Order not found' });
+      }
+      res.json(order);
+    } catch (err) {
+      res.status(500).json({ error: 'Failed to retrieve order' });
+    }
+  });
+
+  app.post('/api/orders', async (req, res) => {
+    try {
+      const db = await readDb();
+      const year = new Date().getFullYear();
+      const count = db.orders.length + 1;
+      const orderIdNumber = String(count).padStart(4, '0');
+      const order_id = `VCN-${year}-${orderIdNumber}`;
+
+      const newOrder: Order = {
+        id: `ord-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        order_id,
+        customer_name: req.body.customer_name || 'Customer',
+        customer_email: req.body.customer_email || '',
+        customer_phone: req.body.customer_phone || '',
+        card_name: req.body.card_name || req.body.customer_name || '',
+        billing_address: req.body.billing_address || '',
+        product_id: req.body.product_id,
+        product_name: req.body.product_name,
+        product_category: req.body.product_category || 'virtual_cards',
+        amount_usd: Number(req.body.amount_usd) || 10,
+        total_npr: Number(req.body.total_npr) || 0,
+        payment_screenshot_url: req.body.payment_screenshot_url || '',
+        status: req.body.status || 'Pending Verification',
+        notes: req.body.notes || '',
+        internal_notes: req.body.internal_notes || '',
+        payment_method: req.body.payment_method || 'esewa',
+        created_at: new Date().toISOString(),
+      };
+
+      db.orders.unshift(newOrder);
+      await writeDb({ orders: db.orders });
+
+      console.log(`[Backend] New Order Created: ${newOrder.order_id} for ${newOrder.customer_name} (${newOrder.customer_email})`);
+      res.status(201).json(newOrder);
+    } catch (err) {
+      console.error('Failed to create order', err);
+      res.status(500).json({ error: 'Failed to create order' });
+    }
+  });
+
+  // Admin updates order status or internal notes
+  app.patch('/api/orders/:id/status', async (req, res) => {
+    try {
+      const db = await readDb();
+      const query = req.params.id.toUpperCase();
+      const idx = db.orders.findIndex(
+        (o) => o.id === req.params.id || o.order_id.toUpperCase() === query
+      );
+
+      if (idx === -1) {
+        return res.status(404).json({ error: 'Order not found' });
+      }
+
+      db.orders[idx] = {
+        ...db.orders[idx],
+        status: req.body.status || db.orders[idx].status,
+        internal_notes: req.body.internal_notes !== undefined ? req.body.internal_notes : db.orders[idx].internal_notes,
+        updated_at: new Date().toISOString(),
+      };
+
+      await writeDb({ orders: db.orders });
+      res.json(db.orders[idx]);
+    } catch (err) {
+      res.status(500).json({ error: 'Failed to update order status' });
+    }
+  });
+
+  // Admin issues card details to specific order
+  app.post('/api/orders/:id/issue-card', async (req, res) => {
+    try {
+      const db = await readDb();
+      const query = req.params.id.toUpperCase();
+      const idx = db.orders.findIndex(
+        (o) => o.id === req.params.id || o.order_id.toUpperCase() === query
+      );
+
+      if (idx === -1) {
+        return res.status(404).json({ error: 'Order not found' });
+      }
+
+      const { cardNumber, expiry, cvv, voucherCode, instructions } = req.body;
+
+      db.orders[idx] = {
+        ...db.orders[idx],
+        status: 'Completed',
+        card_details: {
+          cardNumber: cardNumber || undefined,
+          expiry: expiry || undefined,
+          cvv: cvv || undefined,
+          voucherCode: voucherCode || undefined,
+          deliveredAt: new Date().toISOString(),
+          instructions: instructions || 'Your card credentials are active for international use.',
+        },
+        internal_notes: `${db.orders[idx].internal_notes || ''}\n[Card Issued on ${new Date().toLocaleString()}]`.trim(),
+        updated_at: new Date().toISOString(),
+      };
+
+      await writeDb({ orders: db.orders });
+      console.log(`[Backend] Card issued for order ${db.orders[idx].order_id}`);
+      res.json(db.orders[idx]);
+    } catch (err) {
+      res.status(500).json({ error: 'Failed to issue card details' });
+    }
+  });
+
+  // 5. Active Cards & Security Verification Lookup Endpoint
+  app.post('/api/cards/lookup', async (req, res) => {
+    try {
+      const { identifier, securityKey, verificationType } = req.body;
+      const cleanId = (identifier || '').trim().toLowerCase();
+      const cleanKey = (securityKey || '').trim().toUpperCase();
+
+      if (!cleanId || !cleanKey) {
+        return res.status(400).json({ error: 'Identifier and security verification key are required' });
+      }
+
+      const db = await readDb();
+      // Match by order_id or customer_email
+      const matchedOrders = db.orders.filter(
+        (o) =>
+          o.order_id.toLowerCase() === cleanId ||
+          o.customer_email.toLowerCase() === cleanId
+      );
+
+      if (matchedOrders.length === 0) {
+        return res.status(404).json({ error: 'No order found matching that Order ID or Email' });
+      }
+
+      // Verify secondary key (CVV or Name)
+      const verified = matchedOrders.filter((order) => {
+        if (verificationType === 'cvv') {
+          const cvv = (order.card_details?.cvv || '').trim().toUpperCase();
+          return cvv && cvv === cleanKey;
+        } else {
+          const name = (order.card_name || order.customer_name || '').trim().toUpperCase();
+          return name.includes(cleanKey) || cleanKey.includes(name);
+        }
+      });
+
+      if (verified.length === 0) {
+        return res.status(401).json({
+          error: `Security verification failed: Incorrect ${
+            verificationType === 'cvv' ? 'CVV code' : 'cardholder name'
+          } for this account.`,
+        });
+      }
+
+      res.json({
+        success: true,
+        orders: verified,
+      });
+    } catch (err) {
+      res.status(500).json({ error: 'Failed to perform security verification' });
+    }
+  });
+
+  // 6. Admin Authentication endpoint
+  app.post('/api/admin/login', (req, res) => {
+    try {
+      const { password } = req.body;
+      // Default admin password or check
+      if (password === 'admin123' || password === process.env.ADMIN_PASSWORD) {
+        res.json({
+          success: true,
+          token: `vcn_admin_${Date.now()}`,
+          message: 'Admin authenticated successfully',
+        });
+      } else {
+        res.status(401).json({ success: false, error: 'Invalid admin credentials' });
+      }
+    } catch (err) {
+      res.status(500).json({ error: 'Authentication service error' });
+    }
+  });
+
+  // ==========================================
+  // VITE DEV SERVER OR PRODUCTION STATIC FILES
+  // ==========================================
+  if (process.env.NODE_ENV !== 'production') {
+    const vite = await createViteServer({
+      server: { middlewareMode: true },
+      appType: 'spa',
+    });
+    app.use(vite.middlewares);
+  } else {
+    const distPath = path.join(currentDir, 'dist');
+    app.use(express.static(distPath));
+    app.get('*', (req, res) => {
+      res.sendFile(path.join(distPath, 'index.html'));
+    });
   }
-  const { data: seq, error: seqError } = await supabase.rpc('next_order_number');
-  if (seqError) return res.status(500).json({ error: 'Unable to generate reload ID.' });
-  const reload_id = `RLD-${new Date().getFullYear()}-${String(Number(seq)).padStart(4,'0')}`;
-  const settingsRow = (await supabase.from('settings').select('*').eq('id',1).maybeSingle()).data;
-  const rate = Number(settingsRow?.exchange_rate || 173);
-  const total_npr = Number((amount * rate).toFixed(2));
-  const { data, error: insertError } = await supabase.from('reload_transactions').insert({ reload_id, order_id: order.order_id, customer_name: order.customer_name, customer_email: order.customer_email, card_identifier: identifier, amount_usd: amount, total_npr, payment_method: b.payment_method || 'esewa', transaction_id: b.transaction_id || null, transaction_url: b.transaction_url || null, payment_screenshot_url: screenshotUrl || null, status:'Pending Verification' }).select().single();
-  if (insertError) return res.status(500).json({ error: insertError.message });
-  res.status(201).json(data);
-});
 
-app.get('/api/reloads', requireAdmin, async (_req,res) => { const {data,error}=await supabase.from('reload_transactions').select('*').order('created_at',{ascending:false}); if(error)return res.status(500).json({error:error.message}); res.json(data||[]); });
+  app.listen(Number(PORT), async () => {
+    console.log(`Server listening on port ${PORT}`);
+    
+    // Ensure DB is seeded if empty
+    const db = getAdminDb();
+    const settingsSnap = await db.collection('settings').doc('config').get();
+    if (!settingsSnap.exists) {
+        console.log('[Backend] Seeding database...');
+        await writeDb({
+            settings: DEFAULT_SETTINGS,
+            products: INITIAL_PRODUCTS,
+            orders: INITIAL_ORDERS
+        });
+    }
 
-app.patch('/api/reloads/:id/status', requireAdmin, async (req,res) => {
-  const paramId = String(req.params.id);
-  const status = req.body?.status; if (!['Approved','Rejected'].includes(status)) return res.status(400).json({error:'Invalid reload status'});
-  const {data: reload,error: findError}=await supabase.from('reload_transactions').select('*').eq('reload_id',paramId.toUpperCase()).maybeSingle();
-  if(findError||!reload)return res.status(404).json({error:'Reload transaction not found'});
-  if(reload.status === 'Approved') return res.status(409).json({error:'Reload already approved'});
-  if(status === 'Approved') {
-    const {data: order,error: oe}=await supabase.from('orders').select('*').eq('order_id',reload.order_id).maybeSingle();
-    if(oe||!order)return res.status(404).json({error:'Linked card order not found'});
-    const current=Number(order.card_details?.balanceUSD || order.amount_usd || 0);
-    const updatedDetails={...(order.card_details||{}), balanceUSD:Number((current+Number(reload.amount_usd)).toFixed(2)), lastReloadedAt:new Date().toISOString()};
-    const {error: ue}=await supabase.from('orders').update({card_details:updatedDetails,updated_at:new Date().toISOString()}).eq('id',order.id);
-    if(ue)return res.status(500).json({error:ue.message});
-  }
-  const {data,error}=await supabase.from('reload_transactions').update({status,internal_notes:req.body?.internal_notes||null,updated_at:new Date().toISOString()}).eq('id',reload.id).select().single();
-  if(error)return res.status(500).json({error:error.message}); res.json(data);
-});
+    // Sync live market forex rate on startup
+    syncLiveForexRate().catch((e) => console.error('Initial forex rate sync failed', e));
+  });
+}
 
-// Backend is API-only in the Vercel + Render deployment. A tiny root response is useful for Render health checks.
-app.get('/', (_req, res) => res.json({ service: 'Virtual Card Nepal API', status: 'ok' }));
-
-app.listen(PORT, '0.0.0.0', async () => {
-  console.log(`Virtual Card Nepal API listening on ${PORT}`);
-  try { await seedIfNeeded(); } catch (e) { console.warn('[Backend] Supabase seed check failed:', e); }
-});
+startServer();

@@ -1,4 +1,4 @@
-export type ProductCategory = 'virtual_cards_preloaded' | 'virtual_cards_reloadable' | 'gift_cards' | 'gift_cards_apple' | 'game_topups';
+export type ProductCategory = 'virtual_cards' | 'prepaid_cards' | 'preloaded_cards' | 'google_gift_cards' | 'other_gift_cards' | 'game_topups';
 
 export type OrderStatus = 'Pending Verification' | 'Paid' | 'Completed' | 'Cancelled';
 
@@ -25,14 +25,10 @@ export interface Product {
   delivery_time: string;
   starting_price_npr: number;
   badge_text?: string;
-  active?: boolean;
-  display_order?: number;
   support_note?: string;
 }
 
 export interface CardDeliveryDetails {
-  balanceUSD?: number;
-  lastReloadedAt?: string;
   cardNumber?: string;
   expiry?: string;
   cvv?: string;
@@ -72,36 +68,6 @@ export interface Order {
   updated_at?: string;
 }
 
-export interface ReloadTransaction {
-  id: string;
-  reload_id: string;
-  order_id: string;
-  customer_name: string;
-  customer_email: string;
-  card_identifier: string;
-  amount_usd: number;
-  total_npr: number;
-  payment_method: 'esewa' | 'crypto';
-  transaction_id?: string;
-  transaction_url?: string;
-  payment_screenshot_url?: string;
-  status: 'Pending Verification' | 'Approved' | 'Rejected';
-  internal_notes?: string;
-  created_at: string;
-  updated_at?: string;
-}
-
-export interface PaymentMethod {
-  id: string;
-  name: string;
-  type: 'esewa' | 'crypto' | 'bank' | 'other';
-  enabled: boolean;
-  qr_url?: string;
-  wallet_address?: string;
-  network?: string;
-  instructions?: string;
-}
-
 export interface AppSettings {
   id: number;
   brand_name: string;
@@ -129,7 +95,6 @@ export interface AppSettings {
   support_hours: string;
   crypto_payment_address?: string;
   crypto_payment_network?: string;
-  payment_methods?: PaymentMethod[];
   updated_at?: string;
 }
 

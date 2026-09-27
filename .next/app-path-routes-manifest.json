@@ -1,7 +1,0 @@
-{
-  "/_not-found/page": "/_not-found",
-  "/fkinr/page": "/fkinr",
-  "/page": "/",
-  "/posts/page": "/posts",
-  "/posts/[...slug]/page": "/posts/[...slug]"
-}

@@ -1,0 +1,62 @@
+{
+  "entities": {
+    "AppSettings": {
+      "title": "AppSettings",
+      "description": "Store configuration and global settings",
+      "type": "object",
+      "properties": {
+        "brand_name": { "type": "string" },
+        "brand_tagline": { "type": "string" },
+        "exchange_rate": { "type": "number" },
+        "commission_percent": { "type": "number" },
+        "live_forex_rate": { "type": "number" },
+        "markup_percent": { "type": "number" },
+        "esewa_id": { "type": "string" },
+        "contact_whatsapp": { "type": "string" },
+        "contact_email": { "type": "string" },
+        "store_notice": { "type": "string" },
+        "footer_text": { "type": "string" }
+      }
+    },
+    "Product": {
+      "title": "Product",
+      "description": "Store products including cards and gift cards",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "category": { "type": "string" },
+        "base_usd": { "type": "number" },
+        "starting_price_npr": { "type": "number" }
+      },
+      "required": ["name", "category", "base_usd"]
+    },
+    "Order": {
+      "title": "Order",
+      "description": "Customer purchase orders",
+      "type": "object",
+      "properties": {
+        "order_id": { "type": "string" },
+        "customer_name": { "type": "string" },
+        "customer_email": { "type": "string" },
+        "amount_usd": { "type": "number" },
+        "status": { "type": "string" },
+        "created_at": { "type": "string" }
+      },
+      "required": ["order_id", "customer_name", "customer_email", "status", "created_at"]
+    }
+  },
+  "firestore": {
+    "settings/config": {
+      "schema": "AppSettings",
+      "description": "Singleton configuration document"
+    },
+    "products/{productId}": {
+      "schema": "Product",
+      "description": "Products collection"
+    },
+    "orders/{orderId}": {
+      "schema": "Order",
+      "description": "Orders collection"
+    }
+  }
+}
